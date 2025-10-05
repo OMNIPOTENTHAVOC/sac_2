@@ -2,7 +2,7 @@ import os
 import requests
 from typing import Optional, List, Dict
 
-NASA_API_KEY = os.getenv("NASA_API_KEY", "C1dKltExOkfU7PNIDRAvc3rBvQWaFoyEKZNZhb3C")
+NASA_API_KEY = os.getenv("NASA_API_KEY", "DEMO_KEY")
 
 NEOWS_BROWSE_URL = "https://api.nasa.gov/neo/rest/v1/neo/browse"
 NEOWS_LOOKUP_URL = "https://api.nasa.gov/neo/rest/v1/neo/{}"
