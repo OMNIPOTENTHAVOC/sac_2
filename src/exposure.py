@@ -3,40 +3,51 @@
 Population exposure calculation using WorldPop raster
 """
 
-import rasterio
+import math
+from typing import Union
+
 import numpy as np
+import rasterio
 from pyproj import Transformer
 from rasterio.windows import Window
+from rasterio.windows import transform as window_transform
 from pyproj import Geod
-import math
 
 
 def load_population_raster(path):
     """Load raster using rasterio"""
     return rasterio.open(path)
 
+
 geod = Geod(ellps="WGS84")
+
 
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
-    dphi = math.radians(lat2-lat1)
-    dlambda = math.radians(lon2-lon1)
-    a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2.0)**2
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
     return 2 * R * math.asin(math.sqrt(a))
 
-def population_within_radius(raster, lat, lon, radius_km):
+
+def population_within_radius(
+    raster: rasterio.io.DatasetReader,
+    lat: Union[float, int],
+    lon: Union[float, int],
+    radius_km: Union[float, int],
+) -> float:
     """
     Safe version: sums population within radius_km around lat/lon
     Handles edge-of-raster issues.
     """
     # convert radius to degrees approx
-    radius_deg = radius_km / 111.0
-    minx = lon - radius_deg
-    maxx = lon + radius_deg
-    miny = lat - radius_deg
-    maxy = lat + radius_deg
+    radius_deg = float(radius_km) / 111.0
+    minx = float(lon) - radius_deg
+    maxx = float(lon) + radius_deg
+    miny = float(lat) - radius_deg
+    maxy = float(lat) + radius_deg
 
     try:
         row_min, col_min = raster.index(minx, maxy)
@@ -57,21 +68,40 @@ def population_within_radius(raster, lat, lon, radius_km):
         col_max = col_min
 
     # read window safely
-    window = raster.read(1, window=((row_min, row_max + 1), (col_min, col_max + 1)))
-    # compute cell coordinates
-    rows, cols = np.indices(window.shape)
-    lons, lats = raster.xy(rows + row_min, cols + col_min)
-    lons = np.array(lons)
-    lats = np.array(lats)
+    win = ((row_min, row_max + 1), (col_min, col_max + 1))
+    band = raster.read(1, window=win)  # 2-D array for band 1
 
-    total_pop = 0.0
-    for r, c in np.ndindex(window.shape):
-        val = window[r, c]
-        if val <= 0 or np.isnan(val):
-            continue
-        if haversine_km(lat, lon, lats[r, c], lons[r, c]) <= radius_km:
-            total_pop += val
+    # compute cell coordinates
+    # NOTE: Avoid raster.xy on 2-D index arrays because it returns 1-D vectors.
+    # Build 2-D lon/lat grids using the window-aware affine transform instead.
+    rows2d, cols2d = np.indices(band.shape)
+    wt = window_transform(win, raster.transform)
+    # Affine mapping from pixel indices (col,row) to georeferenced (x,y)
+    xs = wt.c + cols2d * wt.a + rows2d * wt.b
+    ys = wt.f + cols2d * wt.d + rows2d * wt.e
+
+    # If raster is geographic (EPSG:4326), xs=lons and ys=lats already.
+    # Otherwise, transform to WGS84 for distance computation.
+    if raster.crs and raster.crs.is_geographic:
+        lons = xs
+        lats = ys
+    else:
+        transformer = Transformer.from_crs(raster.crs, "EPSG:4326", always_xy=True)
+        lons, lats = transformer.transform(xs, ys)
+
+    # Vectorized haversine distance in km from (lat, lon) to every pixel center
+    phi1 = math.radians(float(lat))
+    phi2 = np.radians(lats)
+    dphi = np.radians(lats - float(lat))
+    dlambda = np.radians(lons - float(lon))
+    a = np.sin(dphi / 2.0) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0) ** 2
+    dist_km = 2 * 6371.0 * np.arcsin(np.sqrt(a))
+
+    # Sum population where pixel value is valid and within the circle
+    valid = (band > 0) & (~np.isnan(band)) & (dist_km <= float(radius_km))
+    total_pop = float(np.nansum(band[valid]))
     return total_pop
+
 
 if __name__ == "__main__":
     # Quick test
@@ -84,4 +114,3 @@ if __name__ == "__main__":
         raster = load_population_raster(WORLDPOP_RASTER)
         pop = population_within_radius(raster, lat=10.0, lon=80.0, radius_km=50)
         print(f"Estimated population within 50 km: {pop}")
-
